@@ -64,14 +64,29 @@ pnpm add kysely
 
 ```ts
 import { Kysely, PostgresDialect } from "kysely"
-import { kycast } from "kycast"
+import { kycast, kycastLogger } from "kycast"
 import { Pool } from "pg"
 
 const db = new Kysely<DB>({
   dialect: new PostgresDialect({ pool: new Pool({ ... }) }),
+  log: kycastLogger(),  // logs every query as JSON to console
 })
 
 const cast = kycast(db)
+```
+
+`kycastLogger()` hooks into Kysely's built-in `log` option and captures every SQL query — from both `cast.table()` and `cast.query()` — in a structured JSON format. The output is designed to be parsed by jig for regression testing.
+
+```json
+{ "kycast": true, "sql": "select * from ...", "parameters": ["1"], "durationMs": 3 }
+```
+
+You can also pass a custom function to send logs to your own logger:
+
+```ts
+log: kycastLogger((event) => {
+  myLogger.info({ sql: event.sql, params: event.parameters, ms: event.durationMs })
+})
 ```
 
 ## Usage
