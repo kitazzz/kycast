@@ -22,17 +22,24 @@
     "test:run": "vitest run",
     "typecheck": "tsc --noEmit"
   },
+  "peerDependencies": {
+    "kysely": ">=0.27.0"
+  },
   "keywords": [],
   "author": "kitazzz",
   "license": "MIT",
   "packageManager": "pnpm@10.5.2",
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "better-sqlite3": "^12.6.2",
+    "kysely": "^0.28.11",
     "tsup": "^8.0.0",
     "typescript": "^5.0.0",
     "vitest": "^3.0.0"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
+      "better-sqlite3",
       "esbuild"
     ]
   }

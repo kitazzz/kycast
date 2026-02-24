@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { version } from "./index";
+import { kycast } from "./index.js";
 
-describe("kycast", () => {
-  it("exports version", () => {
-    expect(version).toBe("0.1.0");
+describe("kycast exports", () => {
+  it("kycast is a function", () => {
+    expect(typeof kycast).toBe("function");
   });
 });
