@@ -1,69 +1,97 @@
 # kycast
 
-Kysely の軽量ラッパー。DB アクセス（I/O境界）と純粋ロジック（steps）を分離し、レビューとテストを容易にする。
+A lightweight [Kysely](https://kysely.dev/) wrapper that enforces a clear boundary between database I/O and pure business logic.
 
-## コンセプト
+## Motivation
+
+In typical business applications, database access and business logic tend to get mixed together, making code hard to review and test.
 
 ```ts
+// Hard to test: DB access and logic are interleaved
+async function reserveOrder(orderId: string) {
+  const order = await db.selectFrom("orders").where("id", "=", orderId).executeTakeFirstOrThrow()
+  if (order.status !== "PENDING") throw new Error("Cannot reserve")
+  const updated = { ...order, status: "RESERVED", total: order.amount * 1.1 }
+  await db.updateTable("orders").set(updated).where("id", "=", orderId).execute()
+  return updated
+}
+```
+
+kycast makes the separation explicit:
+
+```ts
+// DB access is isolated in queryFn; logic lives in pure steps
 await cast.table("orders")(
-  async ({ getOrThrow }) => getOrThrow(orderId),  // DB に触れてよいのはここだけ
-  [validateOrder, computeTotal]                    // steps: 純粋関数のみ
+  async ({ getOrThrow, update }) => {
+    const order = await getOrThrow(orderId)
+    return update(orderId, order)
+  },
+  [
+    (order) => {
+      if (order.status !== "PENDING") throw new Error("Cannot reserve")
+      return { ...order, status: "RESERVED", total: order.amount * 1.1 }
+    },
+  ]
 )
 ```
 
-- **queryFn** — DB に触れてよい唯一の場所（I/O 境界）
-- **steps** — `value => value` の純粋変換列。DB 禁止
-- **tx** — kycast は関与しない。外側で用意して渡す
+### Design principles
 
-## インストール
+- **I/O boundary** — DB access is confined to `queryFn`. Reviewers know exactly where to look for side effects.
+- **Pure steps** — Business logic lives in `steps`: plain functions of `value → value`. Easy to unit test without a database.
+- **No magic** — kycast does not manage transactions, collect effects, or enforce DDD patterns. Bring your own tx and pass it in.
+- **Two levels of access** — `cast.table()` for everyday CRUD; `cast.query()` as an escape hatch for complex queries.
 
-### npm 公開後（予定）
+## Installation
 
-```sh
-pnpm add kysely kycast
-```
-
-### 現時点（GitHub から直接）
+> **Note:** kycast is not yet published to npm. Install directly from GitHub in the meantime.
 
 ```sh
-# GitHub から
+# From GitHub
 pnpm add github:kitazzz/kycast
 
-# ローカル開発中のパスから
+# From a local path (during development)
 pnpm add /path/to/kycast
 ```
 
-> **前提**: `kysely` は peerDependency なので別途インストールが必要です。
+kysely is a peer dependency — install it separately:
 
-## セットアップ
+```sh
+pnpm add kysely
+```
+
+## Setup
 
 ```ts
 import { Kysely, PostgresDialect } from "kysely"
 import { kycast } from "kycast"
 import { Pool } from "pg"
 
-// 1. Kysely の db を用意する（既存の設定をそのまま使う）
 const db = new Kysely<DB>({
   dialect: new PostgresDialect({ pool: new Pool({ ... }) }),
 })
 
-// 2. db を渡して cast を作る
 const cast = kycast(db)
 ```
 
-## 使い方
+## Usage
 
-### Table API（推奨）
+### Table API (recommended)
 
-テーブル単位の便利メソッドを使う高レベル API。
+High-level CRUD methods scoped to a single table. Requires the table to have an `id: string` column.
 
 ```ts
-// ID でレコードを取得
+// Fetch by ID (returns null if not found)
+const order = await cast.table("orders")(
+  ({ get }) => get(orderId)
+)
+
+// Fetch by ID (throws if not found)
 const order = await cast.table("orders")(
   ({ getOrThrow }) => getOrThrow(orderId)
 )
 
-// 条件でフィルター
+// Filter, sort, limit
 const orders = await cast.table("orders")(
   ({ find }) => find({
     condition: (eb) => eb.eb("status", "=", "PENDING"),
@@ -72,12 +100,19 @@ const orders = await cast.table("orders")(
   })
 )
 
-// 作成
+// Find one (defaults to createdAt desc when orderBy is omitted)
+const latest = await cast.table("orders")(
+  ({ findOne }) => findOne({
+    condition: (eb) => eb.eb("userId", "=", userId),
+  })
+)
+
+// Create
 const newOrder = await cast.table("orders")(
   ({ create }) => create({ id: "...", status: "PENDING", amount: 1000 })
 )
 
-// 更新
+// Update
 const updated = await cast.table("orders")(
   ({ update }) => update(orderId, { status: "RESERVED" })
 )
@@ -87,35 +122,44 @@ await cast.table("orders")(
   ({ upsert }) => upsert({ id: "...", status: "DONE", amount: 1000 })
 )
 
-// 一括 Upsert（500件チャンク処理）
+// Bulk upsert (processed in chunks of 500)
 await cast.table("orders")(
   ({ bulkUpsert }) => bulkUpsert([...records])
 )
 
-// 削除
+// Delete
 await cast.table("orders")(
   ({ delete: del }) => del(orderId)
 )
 ```
 
-#### steps で純粋ロジックを挟む
+#### Adding pure steps
 
 ```ts
 const result = await cast.table("orders")(
   async ({ getOrThrow }) => getOrThrow(orderId),
   [
     (order) => {
-      if (order.status !== "PENDING") throw new Error("予約できない状態")
+      if (order.status !== "PENDING") throw new Error("Cannot reserve")
       return { ...order, status: "RESERVED" }
     },
     computeTotal,
+    enrichForResponse,
   ]
 )
 ```
 
-### Query API（複雑クエリ用）
+Steps receive only the value — no `db`, no `env`. This makes them trivial to unit test:
 
-JOIN や集計など、Table API では対応できないケースで使う。
+```ts
+it("rejects non-pending orders", () => {
+  expect(() => reserveStep({ ...order, status: "DONE" })).toThrow("Cannot reserve")
+})
+```
+
+### Query API (escape hatch)
+
+Use `cast.query()` when Table API is not enough — JOINs, aggregations, complex filters.
 
 ```ts
 const rows = await cast.query(
@@ -130,9 +174,11 @@ const rows = await cast.query(
 )
 ```
 
-### トランザクション
+Available in `queryFn`: `selectFrom`, `insertInto`, `updateTable`, `deleteFrom`.
 
-tx の管理は kycast の外側で行い、tx を `kycast()` に渡す。
+### Transactions
+
+kycast does not manage transactions. Create a transaction externally and pass it to `kycast()`.
 
 ```ts
 await db.transaction().execute(async (tx) => {
@@ -149,41 +195,39 @@ await db.transaction().execute(async (tx) => {
 })
 ```
 
-### 型定義
-
-Kysely のスキーマ型をそのまま使う。
+### TypeScript types
 
 ```ts
 import type { TableWithId, FilterCondition, Step } from "kycast"
 
-// id カラムを持つテーブルのみ受け付ける型
+// Tables that have an id column
 type MyTable = TableWithId<DB>  // => "orders" | "users" | ...
 
-// 型安全な where 条件
+// Type-safe where condition
 const activeOnly: FilterCondition<DB, "orders"> = (eb) =>
   eb.eb("status", "!=", "CANCELLED")
 
-// 純粋変換
+// Pure step
 const enrichOrder: Step<Order> = (order) => ({
   ...order,
   displayName: `Order #${order.id}`,
 })
 ```
 
-## API リファレンス
+## API Reference
 
 ### `kycast(db)`
 
 ```ts
-const cast = kycast(db)  // db は Kysely<DB> または Transaction<DB>
+const cast = kycast(db)  // db: Kysely<DB> | Transaction<DB>
 ```
 
 ### `cast.table(tableName)(queryFn, steps?)`
 
-`id` カラムを持つテーブルを対象とした高レベル API。
+Requires `tableName` to reference a table with an `id: string` column.
 
-| メソッド | シグネチャ |
-|----------|-----------|
+| Method | Signature |
+|--------|-----------|
 | `get` | `(id: string) => Promise<Row \| null>` |
 | `getOrThrow` | `(id: string) => Promise<Row>` |
 | `find` | `(options?) => Promise<Row[]>` |
@@ -196,10 +240,8 @@ const cast = kycast(db)  // db は Kysely<DB> または Transaction<DB>
 
 ### `cast.query(queryFn, steps?)`
 
-Kysely DSL への低レベルアクセス。
-
-| 提供されるメソッド |
-|-------------------|
+| Available in `queryFn` |
+|------------------------|
 | `selectFrom` |
 | `insertInto` |
 | `updateTable` |
@@ -211,13 +253,13 @@ Kysely DSL への低レベルアクセス。
 type Step<T> = (value: T) => T | Promise<T>
 ```
 
-## 開発
+## Development
 
 ```sh
 pnpm install
-pnpm test:run   # テスト
-pnpm typecheck  # 型チェック
-pnpm build      # ビルド
+pnpm test:run   # run tests
+pnpm typecheck  # type check
+pnpm build      # build CJS + ESM
 ```
 
 ## License
