@@ -41,6 +41,7 @@ await cast.table("orders")(
 - **Pure steps** — Business logic lives in `steps`: plain functions of `value → value`. Easy to unit test without a database.
 - **No magic** — kycast does not manage transactions, collect effects, or enforce DDD patterns. Bring your own tx and pass it in.
 - **Two levels of access** — `cast.table()` for everyday CRUD; `cast.query()` as an escape hatch for complex queries.
+- **Observable** — `kycastLogger()` records every SQL query in a structured format, enabling future regression testing (jig) without changing application code.
 
 ## Installation
 
@@ -261,6 +262,30 @@ Requires `tableName` to reference a table with an `id: string` column.
 | `insertInto` |
 | `updateTable` |
 | `deleteFrom` |
+
+### `kycastLogger(fn?)`
+
+Creates a function to pass to Kysely's `log` option. Captures every executed SQL query from both `cast.table()` and `cast.query()`.
+
+```ts
+import { kycastLogger } from "kycast"
+import type { KycastLogEvent } from "kycast"
+
+// Default: prints structured JSON to console
+log: kycastLogger()
+
+// Custom: forward to your own logger
+log: kycastLogger((event: KycastLogEvent) => {
+  // event.sql          — the executed SQL string
+  // event.parameters   — bound parameter values
+  // event.durationMs   — execution time in milliseconds
+})
+```
+
+Default output format (one line per query):
+```json
+{ "kycast": true, "sql": "...", "parameters": [...], "durationMs": 3 }
+```
 
 ### `Step<T>`
 
